@@ -50,11 +50,10 @@ def procesar_encuesta():
         doc = DocxTemplate(template_path)
         
         # ---------------------------------------------------------
-        # 1. GENERAR IMAGEN DEL MAPA DE LOCALIZACIÓN (si hay coordenadas)
+        # 1. MAPA DE LOCALIZACIÓN BLINDADO (Usando OpenStreetMap estático)
         # ---------------------------------------------------------
         if lon and lat:
-            # Usamos un servicio estático para renderizar el mapa de las coordenadas
-            map_url = f"https://static-maps.yandex.1.lt/1.x/?ll={lon},{lat}&z=16&size=450,250&l=map&pt={lon},{lat},comma"
+            map_url = f"https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&z=15&size=450,250&l=map&pt={lon},{lat},comma"
             try:
                 map_res = requests.get(map_url, timeout=10)
                 if map_res.status_code == 200:
@@ -62,48 +61,46 @@ def procesar_encuesta():
                     with open(map_path, "wb") as f:
                         f.write(map_res.content)
                     downloaded_files.append(map_path)
-                    # Insertar en la plantilla usando una etiqueta {{ mapa_ubicacion }}
                     atributos['mapa_ubicacion'] = InlineImage(doc, map_path, width=Inches(5.0))
                 else:
-                    atributos['mapa_ubicacion'] = "Mapa no disponible (error al generar imagen)"
+                    atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
             except Exception as e:
                 print(f"No se pudo descargar el mapa: {e}", flush=True)
-                atributos['mapa_ubicacion'] = "Mapa no disponible"
+                atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
         else:
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # 2. PROCESAR FOTOS DEL REGISTRO FOTOGRÁFICO
+        # 2. PROCESAR FOTOS BLINDADO CONTRA VALORES NULOS
         # ---------------------------------------------------------
-        # Survey123 envía los archivos adjuntos en la lista 'attachments' o en los atributos
         attachments = feature.get('attachments', [])
-        
-        # Procesamos las fotos disponibles de forma dinámica si llegan adjuntas
+        if not isinstance(attachments, list):
+            attachments = []
+            
         for i, att in enumerate(attachments[:10], start=1):
-            att_url = att.get('url')
-            if att_url:
-                try:
-                    # Descargar la foto usando los permisos o token si es necesario
-                    photo_res = requests.get(att_url, timeout=15)
-                    if photo_res.status_code == 200:
-                        photo_path = f"foto_{object_id}_{i}.jpg"
-                        with open(photo_path, "wb") as f:
-                            f.write(photo_res.content)
-                        downloaded_files.append(photo_path)
-                        
-                        # Reemplazar en la plantilla (ej: registro_fotogr_fico_1)
-                        tag_name = f"registro_fotogr_fico_{i}"
-                        atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
-                except Exception as ex:
-                    print(f"Error descargando foto {i}: {ex}", flush=True)
+            if isinstance(att, dict):
+                att_url = att.get('url')
+                if att_url:
+                    try:
+                        photo_res = requests.get(att_url, timeout=15)
+                        if photo_res.status_code == 200:
+                            photo_path = f"foto_{object_id}_{i}.jpg"
+                            with open(photo_path, "wb") as f:
+                                f.write(photo_res.content)
+                            downloaded_files.append(photo_path)
+                            
+                            tag_name = f"registro_fotogr_fico_{i}"
+                            atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
+                    except Exception as ex:
+                        print(f"Error descargando foto {i}: {ex}", flush=True)
 
-        # Renderizar la plantilla con textos, coordenadas, mapa e imágenes
+        # Renderizar plantilla
         doc.render(atributos)
         doc.save(output_path)
-        print("Documento Word generado exitosamente con mapa y fotografías.", flush=True)
+        print("Documento Word generado exitosamente.", flush=True)
 
         # ---------------------------------------------------------
-        # 3. ENVIAR A WHATSAPP (API DE META)
+        # 3. ENVIAR A WHATSAPP
         # ---------------------------------------------------------
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -132,7 +129,7 @@ def procesar_encuesta():
             "type": "document",
             "document": {
                 "id": media_id,
-                "caption": "Adjunto el reporte oficial de inspección estructural con mapa y registro fotográfico.",
+                "caption": "Adjunto el reporte oficial de inspección estructural actualizado.",
                 "filename": f"Reporte_Habitabilidad_{object_id}.docx"
             }
         }
@@ -143,7 +140,7 @@ def procesar_encuesta():
         
         requests.post(message_url, headers=headers_msg, json=payload_message)
 
-        # Limpieza de archivos temporales generados en el servidor
+        # Limpieza
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
