@@ -50,10 +50,9 @@ def procesar_encuesta():
         doc = DocxTemplate(template_path)
         
         # ---------------------------------------------------------
-        # 1. MAPA DE LOCALIZACIÓN (Usando OpenStreetMap estático y seguro)
+        # 1. MAPA DE LOCALIZACIÓN (OpenStreetMap estático)
         # ---------------------------------------------------------
         if lon and lat:
-            # Usamos un servicio de mapa estático público y abierto compatible
             map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=15&size=450x250&markers={lat},{lon},lightblue"
             try:
                 map_res = requests.get(map_url, timeout=10)
@@ -72,9 +71,11 @@ def procesar_encuesta():
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # 2. PROCESAR FOTOS ADJUNTAS DE SURVEY123
+        # 2. PROCESAR FOTOS ADJUNTAS DE SURVEY123 (Con logs de diagnóstico)
         # ---------------------------------------------------------
         attachments = feature.get('attachments', [])
+        print(f"Adjuntos encontrados en el payload: {attachments}", flush=True)
+        
         if isinstance(attachments, list):
             for i, att in enumerate(attachments[:10], start=1):
                 if isinstance(att, dict):
@@ -82,17 +83,20 @@ def procesar_encuesta():
                     if att_url:
                         try:
                             photo_res = requests.get(att_url, timeout=15)
+                            print(f"Descargando foto {i} - Status HTTP: {photo_res.status_code}", flush=True)
+                            
                             if photo_res.status_code == 200:
                                 photo_path = f"foto_{object_id}_{i}.jpg"
                                 with open(photo_path, "wb") as f:
                                     f.write(photo_res.content)
                                 downloaded_files.append(photo_path)
                                 
-                                # Coincide exactamente con el tag en Word: {{ registro_fotogr_fico_1 }}
                                 tag_name = f"registro_fotogr_fico_{i}"
                                 atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
+                            else:
+                                print(f"Fallo al descargar foto {i}. Respuesta: {photo_res.text[:200]}", flush=True)
                         except Exception as ex:
-                            print(f"Error descargando foto {i}: {ex}", flush=True)
+                            print(f"Excepción descargando foto {i}: {ex}", flush=True)
 
         # Renderizar plantilla con todos los datos y gráficos
         doc.render(atributos)
@@ -142,7 +146,7 @@ def procesar_encuesta():
         msg_response = requests.post(message_url, headers=headers_msg, json=payload_message)
         print(f"Resultado final Meta: {msg_response.json()}", flush=True)
 
-        # Limpieza
+        # Limpieza de archivos temporales locales
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
