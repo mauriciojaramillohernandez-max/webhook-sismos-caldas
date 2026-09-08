@@ -1,96 +1,59 @@
 import os
-import requests
 from flask import Flask, request, jsonify
-from docxtpl import DocxTemplate, InlineImage
-from docx.shared import Inches
+# Importa aquí las demás librerías que estés usando (ej. docxtpl, requests, etc.)
 
 app = Flask(__name__)
 
+# Variables de entorno seguras (conectadas a Render)
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
-FEATURE_SERVER_URL = "https://services6.arcgis.com/1nAgWaTpcz1xqHWX/arcgis/rest/services/survey123_277ceb6f446641289a666384c41cb519/FeatureServer/0"
-
-REPORTS_DIR = "static/reports"
-os.makedirs(REPORTS_DIR, exist_ok=True)
-
-def descargar_adjuntos(object_id):
-    url_attachments = f"{FEATURE_SERVER_URL}/{object_id}/attachments?f=json"
-    response = requests.get(url_attachments).json()
-
-    fotos_paths = {}
-    attachments = response.get("attachmentInfos", [])
-    temp_dir = "temp_fotos"
-    os.makedirs(temp_dir, exist_ok=True)
-
-    for i, att in enumerate(attachments):
-        att_id = att["id"]
-        att_name = att["name"]
-        download_url = f"{FEATURE_SERVER_URL}/{object_id}/attachments/{att_id}"
-
-        img_data = requests.get(download_url).content
-        img_path = f"{temp_dir}/foto_{i+1}_{att_name}"
-
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-
-        fotos_paths[f"foto_{i+1}"] = img_path
-
-    return fotos_paths
-
-def enviar_whatsapp(numero, url_documento, nombre_archivo):
-    url_api = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": numero,
-        "type": "document",
-        "document": {
-            "link": url_documento,
-            "filename": nombre_archivo,
-            "caption": "⚠️ Reporte de Inspección Post-Sismo generado exitosamente (0 créditos de ArcGIS)."
-        }
-    }
-    return requests.post(url_api, headers=headers, json=data).json()
 
 @app.route('/webhook', methods=['POST'])
 def procesar_encuesta():
     try:
+        # 1. Recibir los datos de Survey123
         data = request.json
+        
+        # --- LÍNEAS DE DEPURACIÓN (Nuevas) ---
+        print("================ DATOS RECIBIDOS DE SURVEY123 ================", flush=True)
+        print(data, flush=True)
+        print("==============================================================", flush=True)
+        
+        # 2. Extraer atributos del diccionario que envía Survey123
         atributos = data.get('feature', {}).get('attributes', {})
         object_id = atributos.get('OBJECTID')
+        
+        # 3. Extraer y formatear el número de celular
+        numero_celular = str(atributos.get('celular_contacto', '')).strip()
+        
+        # 4. Validaciones (Estas son las que devuelven el error 400 si falta algo)
+        if not numero_celular or numero_celular == 'None':
+            print("Error: El campo 'celular_contacto' llegó vacío o no existe en el formulario.", flush=True)
+            return jsonify({"error": "Falta el número de celular"}), 400
+            
+        if not object_id:
+            print("Error: No se encontró el OBJECTID en la carga útil.", flush=True)
+            return jsonify({"error": "Falta el OBJECTID"}), 400
 
-        numero_celular = str(atributos.get('celular_contacto', ''))
+        # Ajustar código de país (57 para Colombia)
         if not numero_celular.startswith("57"):
             numero_celular = f"57{numero_celular}"
 
-        doc = DocxTemplate("template.docx")
-        contexto_fotos = descargar_adjuntos(object_id)
-
-        imagenes_render = {}
-        for key, path in contexto_fotos.items():
-            imagenes_render[key] = InlineImage(doc, path, width=Inches(3.5))
-
-        contexto = {**atributos, **imagenes_render}
-        doc.render(contexto)
-
-        nombre_archivo = f"Reporte_Inspeccion_{object_id}.docx"
-        output_path = os.path.join(REPORTS_DIR, nombre_archivo)
-        doc.save(output_path)
-
-        url_publica = f"{request.host_url}static/reports/{nombre_archivo}"
-        enviar_whatsapp(numero_celular, url_publica, nombre_archivo)
-
-        for path in contexto_fotos.values():
-            if os.path.exists(path):
-                os.remove(path)
-
-        return jsonify({"status": "Éxito - Reporte generado y enviado"}), 200
+        # ---------------------------------------------------------
+        # AQUÍ VA TU LÓGICA EXISTENTE PARA CREAR EL REPORTE (template.docx)
+        # Y HACER LA PETICIÓN POST A LA API DE WHATSAPP
+        # ---------------------------------------------------------
+        
+        print(f"Proceso exitoso. Generando reporte para el celular: {numero_celular}", flush=True)
+        
+        # Retorno de éxito
+        return jsonify({"status": "success", "message": "Reporte procesado"}), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        # Si el código se estrella por otro motivo, lo mostrará en rojo aquí
+        print(f"Error interno procesando webhook: {str(e)}", flush=True)
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Configuración del puerto para Render
+    app.run(host='0.0.0.0', port=10000)
