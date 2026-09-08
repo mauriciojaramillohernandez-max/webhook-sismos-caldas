@@ -27,10 +27,6 @@ def procesar_encuesta():
         atributos['longitud'] = str(lon) if lon else 'No disponible'
         atributos['latitud'] = str(lat) if lat else 'No disponible'
         
-        # En lugar de arriesgar el servidor descargando imágenes de mapas externos,
-        # dejamos las coordenadas limpias en el texto del reporte.
-        atributos['mapa_ubicacion'] = f"Latitud: {lat}, Longitud: {lon}" if lat and lon else "No disponible"
-        
         object_id = feature.get('result', {}).get('objectId')
         if not object_id:
             object_id = atributos.get('objectid', 'temp')
@@ -53,7 +49,31 @@ def procesar_encuesta():
             
         doc = DocxTemplate(template_path)
         
-        # Procesamiento seguro de adjuntos (fotos)
+        # ---------------------------------------------------------
+        # 1. MAPA DE LOCALIZACIÓN (Usando OpenStreetMap estático y seguro)
+        # ---------------------------------------------------------
+        if lon and lat:
+            # Usamos un servicio de mapa estático público y abierto compatible
+            map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=15&size=450x250&markers={lat},{lon},lightblue"
+            try:
+                map_res = requests.get(map_url, timeout=10)
+                if map_res.status_code == 200:
+                    map_path = f"mapa_{object_id}.png"
+                    with open(map_path, "wb") as f:
+                        f.write(map_res.content)
+                    downloaded_files.append(map_path)
+                    atributos['mapa_ubicacion'] = InlineImage(doc, map_path, width=Inches(5.0))
+                else:
+                    atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
+            except Exception as e:
+                print(f"No se pudo descargar el mapa: {e}", flush=True)
+                atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
+        else:
+            atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
+
+        # ---------------------------------------------------------
+        # 2. PROCESAR FOTOS ADJUNTAS DE SURVEY123
+        # ---------------------------------------------------------
         attachments = feature.get('attachments', [])
         if isinstance(attachments, list):
             for i, att in enumerate(attachments[:10], start=1):
@@ -61,23 +81,27 @@ def procesar_encuesta():
                     att_url = att.get('url')
                     if att_url:
                         try:
-                            photo_res = requests.get(att_url, timeout=10)
+                            photo_res = requests.get(att_url, timeout=15)
                             if photo_res.status_code == 200:
                                 photo_path = f"foto_{object_id}_{i}.jpg"
                                 with open(photo_path, "wb") as f:
                                     f.write(photo_res.content)
                                 downloaded_files.append(photo_path)
+                                
+                                # Coincide exactamente con el tag en Word: {{ registro_fotogr_fico_1 }}
                                 tag_name = f"registro_fotogr_fico_{i}"
                                 atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
                         except Exception as ex:
-                            print(f"Aviso: No se pudo descargar la foto {i}: {ex}", flush=True)
+                            print(f"Error descargando foto {i}: {ex}", flush=True)
 
-        # Renderizar plantilla
+        # Renderizar plantilla con todos los datos y gráficos
         doc.render(atributos)
         doc.save(output_path)
-        print("Documento Word generado exitosamente.", flush=True)
+        print("Documento Word con mapa y fotos generado exitosamente.", flush=True)
 
-        # Enviar a WhatsApp (Meta API)
+        # ---------------------------------------------------------
+        # 3. ENVIAR A WHATSAPP
+        # ---------------------------------------------------------
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         
@@ -106,8 +130,8 @@ def procesar_encuesta():
             "type": "document",
             "document": {
                 "id": media_id,
-                "caption": "Adjunto el reporte oficial de inspección estructural.",
-                "filename": f"Reporte_Habitabilidad_{object_id}.docx"
+                "caption": "Adjunto el reporte oficial de inspección con mapa y registro fotográfico.",
+                "filename": f"Reporte_Inspeccion_{object_id}.docx"
             }
         }
         headers_msg = {
@@ -118,7 +142,7 @@ def procesar_encuesta():
         msg_response = requests.post(message_url, headers=headers_msg, json=payload_message)
         print(f"Resultado final Meta: {msg_response.json()}", flush=True)
 
-        # Limpieza de archivos temporales
+        # Limpieza
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
