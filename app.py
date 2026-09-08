@@ -5,7 +5,6 @@ from docxtpl import DocxTemplate
 
 app = Flask(__name__)
 
-# Credenciales de Meta almacenadas en Render
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
 
@@ -18,16 +17,18 @@ def procesar_encuesta():
         
         feature = data.get('feature', {})
         atributos = feature.get('attributes', {})
+        geometria = feature.get('geometry', {})
         
-        # 1. Búsqueda inteligente del ID
+        # Inyectar coordenadas
+        atributos['longitud'] = geometria.get('x', 'No disponible')
+        atributos['latitud'] = geometria.get('y', 'No disponible')
+        
         object_id = feature.get('result', {}).get('objectId')
         if not object_id:
             object_id = atributos.get('objectid')
             
-        # 2. Extraer y limpiar el número de celular
         numero_celular = str(atributos.get('celular_contacto', '')).strip().replace('+', '')
         
-        # 3. Validaciones
         if not numero_celular or numero_celular == 'None':
             print("Error: El campo 'celular_contacto' llegó vacío.", flush=True)
             return jsonify({"error": "Falta el número de celular"}), 400
@@ -36,14 +37,13 @@ def procesar_encuesta():
             print("Error: No se encontró el OBJECTID.", flush=True)
             return jsonify({"error": "Falta el OBJECTID"}), 400
 
-        # Ajustar código de país (57 para Colombia)
         if not numero_celular.startswith("57"):
             numero_celular = f"57{numero_celular}"
 
         print(f"Procesando ID: {object_id} para el celular: {numero_celular}", flush=True)
 
         # ---------------------------------------------------------
-        # 4. GENERAR EL REPORTE EN WORD
+        # GENERAR EL REPORTE EN WORD
         # ---------------------------------------------------------
         template_path = "template.docx"
         output_path = f"Reporte_Inspeccion_{object_id}.docx"
@@ -52,16 +52,14 @@ def procesar_encuesta():
             print("Error: No se encontró el archivo template.docx en el servidor.", flush=True)
             return jsonify({"error": "Plantilla no encontrada"}), 500
             
-        # Abrimos la plantilla y la llenamos con todos los datos de Survey123
         doc = DocxTemplate(template_path)
         doc.render(atributos)
         doc.save(output_path)
         print("Documento Word generado exitosamente.", flush=True)
 
         # ---------------------------------------------------------
-        # 5. ENVIAR A WHATSAPP (API DE META)
+        # ENVIAR A WHATSAPP (API DE META)
         # ---------------------------------------------------------
-        # PASO A: Subir el documento temporalmente a los servidores de Meta
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         
@@ -83,7 +81,6 @@ def procesar_encuesta():
             
         media_id = upload_result["id"]
 
-        # PASO B: Enviar el mensaje al usuario con el documento adjunto
         message_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/messages"
         payload_message = {
             "messaging_product": "whatsapp",
@@ -107,15 +104,15 @@ def procesar_encuesta():
         
         print(f"Resultado final Meta: {msg_result}", flush=True)
 
-        # 6. Limpieza: Borramos el Word temporal del servidor para no ocupar espacio
+        # Limpieza del archivo temporal
         if os.path.exists(output_path):
             os.remove(output_path)
 
-        return jsonify({"status": "success", "message": "Reporte enviado", "meta_response": msg_result}), 200
+        # Respuesta limpia y directa para que Survey123 cierre el ciclo sin errores
+        return jsonify({"status": "success", "message": "Reporte generado y enviado por WhatsApp"}), 200
 
     except Exception as e:
         print(f"Error interno fatal: {str(e)}", flush=True)
-        # Limpieza de emergencia por si el código se estrella antes de borrar
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
