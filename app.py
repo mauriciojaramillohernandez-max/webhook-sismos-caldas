@@ -27,6 +27,10 @@ def procesar_encuesta():
         atributos['longitud'] = str(lon) if lon else 'No disponible'
         atributos['latitud'] = str(lat) if lat else 'No disponible'
         
+        # En lugar de arriesgar el servidor descargando imágenes de mapas externos,
+        # dejamos las coordenadas limpias en el texto del reporte.
+        atributos['mapa_ubicacion'] = f"Latitud: {lat}, Longitud: {lon}" if lat and lon else "No disponible"
+        
         object_id = feature.get('result', {}).get('objectId')
         if not object_id:
             object_id = atributos.get('objectid', 'temp')
@@ -49,59 +53,31 @@ def procesar_encuesta():
             
         doc = DocxTemplate(template_path)
         
-        # ---------------------------------------------------------
-        # 1. MAPA DE LOCALIZACIÓN BLINDADO (Usando OpenStreetMap estático)
-        # ---------------------------------------------------------
-        if lon and lat:
-            map_url = f"https://static-maps.yandex.ru/1.x/?ll={lon},{lat}&z=15&size=450,250&l=map&pt={lon},{lat},comma"
-            try:
-                map_res = requests.get(map_url, timeout=10)
-                if map_res.status_code == 200:
-                    map_path = f"mapa_{object_id}.png"
-                    with open(map_path, "wb") as f:
-                        f.write(map_res.content)
-                    downloaded_files.append(map_path)
-                    atributos['mapa_ubicacion'] = InlineImage(doc, map_path, width=Inches(5.0))
-                else:
-                    atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
-            except Exception as e:
-                print(f"No se pudo descargar el mapa: {e}", flush=True)
-                atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
-        else:
-            atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
-
-        # ---------------------------------------------------------
-        # 2. PROCESAR FOTOS BLINDADO CONTRA VALORES NULOS
-        # ---------------------------------------------------------
+        # Procesamiento seguro de adjuntos (fotos)
         attachments = feature.get('attachments', [])
-        if not isinstance(attachments, list):
-            attachments = []
-            
-        for i, att in enumerate(attachments[:10], start=1):
-            if isinstance(att, dict):
-                att_url = att.get('url')
-                if att_url:
-                    try:
-                        photo_res = requests.get(att_url, timeout=15)
-                        if photo_res.status_code == 200:
-                            photo_path = f"foto_{object_id}_{i}.jpg"
-                            with open(photo_path, "wb") as f:
-                                f.write(photo_res.content)
-                            downloaded_files.append(photo_path)
-                            
-                            tag_name = f"registro_fotogr_fico_{i}"
-                            atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
-                    except Exception as ex:
-                        print(f"Error descargando foto {i}: {ex}", flush=True)
+        if isinstance(attachments, list):
+            for i, att in enumerate(attachments[:10], start=1):
+                if isinstance(att, dict):
+                    att_url = att.get('url')
+                    if att_url:
+                        try:
+                            photo_res = requests.get(att_url, timeout=10)
+                            if photo_res.status_code == 200:
+                                photo_path = f"foto_{object_id}_{i}.jpg"
+                                with open(photo_path, "wb") as f:
+                                    f.write(photo_res.content)
+                                downloaded_files.append(photo_path)
+                                tag_name = f"registro_fotogr_fico_{i}"
+                                atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
+                        except Exception as ex:
+                            print(f"Aviso: No se pudo descargar la foto {i}: {ex}", flush=True)
 
         # Renderizar plantilla
         doc.render(atributos)
         doc.save(output_path)
         print("Documento Word generado exitosamente.", flush=True)
 
-        # ---------------------------------------------------------
-        # 3. ENVIAR A WHATSAPP
-        # ---------------------------------------------------------
+        # Enviar a WhatsApp (Meta API)
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         
@@ -117,6 +93,7 @@ def procesar_encuesta():
             upload_result = upload_response.json()
             
         if "id" not in upload_result:
+            print(f"Error de Meta al subir archivo: {upload_result}", flush=True)
             return jsonify({"error": "Fallo al subir documento", "details": upload_result}), 500
             
         media_id = upload_result["id"]
@@ -129,7 +106,7 @@ def procesar_encuesta():
             "type": "document",
             "document": {
                 "id": media_id,
-                "caption": "Adjunto el reporte oficial de inspección estructural actualizado.",
+                "caption": "Adjunto el reporte oficial de inspección estructural.",
                 "filename": f"Reporte_Habitabilidad_{object_id}.docx"
             }
         }
@@ -138,9 +115,10 @@ def procesar_encuesta():
             "Content-Type": "application/json"
         }
         
-        requests.post(message_url, headers=headers_msg, json=payload_message)
+        msg_response = requests.post(message_url, headers=headers_msg, json=payload_message)
+        print(f"Resultado final Meta: {msg_response.json()}", flush=True)
 
-        # Limpieza
+        # Limpieza de archivos temporales
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
@@ -150,7 +128,7 @@ def procesar_encuesta():
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"Error interno: {str(e)}", flush=True)
+        print(f"Error interno fatal: {str(e)}", flush=True)
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
