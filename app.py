@@ -4,31 +4,32 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Variables de entorno seguras (conectadas a Render)
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
 
 @app.route('/webhook', methods=['POST'])
 def procesar_encuesta():
     try:
-        # 1. Recibir los datos de Survey123
         data = request.json
-        
-        # --- LÍNEAS DE DEPURACIÓN (Nuevas) ---
         print("================ DATOS RECIBIDOS DE SURVEY123 ================", flush=True)
         print(data, flush=True)
         print("==============================================================", flush=True)
         
-        # 2. Extraer atributos del diccionario que envía Survey123
-        atributos = data.get('feature', {}).get('attributes', {})
-        object_id = atributos.get('OBJECTID')
+        feature = data.get('feature', {})
+        atributos = feature.get('attributes', {})
         
-        # 3. Extraer y formatear el número de celular
+        # 1. Búsqueda inteligente del ID del registro
+        object_id = feature.get('result', {}).get('objectId')
+        if not object_id:
+            object_id = atributos.get('objectid') # Respaldo por si llega en minúscula
+            
+        # 2. Extraer y limpiar el número de celular
         numero_celular = str(atributos.get('celular_contacto', '')).strip()
+        numero_celular = numero_celular.replace('+', '') # Eliminar el símbolo + si lo escribieron
         
-        # 4. Validaciones (Estas son las que devuelven el error 400 si falta algo)
+        # 3. Validaciones de seguridad
         if not numero_celular or numero_celular == 'None':
-            print("Error: El campo 'celular_contacto' llegó vacío o no existe en el formulario.", flush=True)
+            print("Error: El campo 'celular_contacto' llegó vacío o no existe.", flush=True)
             return jsonify({"error": "Falta el número de celular"}), 400
             
         if not object_id:
@@ -40,20 +41,16 @@ def procesar_encuesta():
             numero_celular = f"57{numero_celular}"
 
         # ---------------------------------------------------------
-        # AQUÍ VA TU LÓGICA EXISTENTE PARA CREAR EL REPORTE (template.docx)
+        # AQUÍ VA TU LÓGICA EXISTENTE PARA DESCARGAR FOTOS, CREAR EL REPORTE (template.docx)
         # Y HACER LA PETICIÓN POST A LA API DE WHATSAPP
         # ---------------------------------------------------------
         
-        print(f"Proceso exitoso. Generando reporte para el celular: {numero_celular}", flush=True)
-        
-        # Retorno de éxito
+        print(f"Proceso exitoso. ID: {object_id} | Celular destino: {numero_celular}", flush=True)
         return jsonify({"status": "success", "message": "Reporte procesado"}), 200
 
     except Exception as e:
-        # Si el código se estrella por otro motivo, lo mostrará en rojo aquí
         print(f"Error interno procesando webhook: {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Configuración del puerto para Render
     app.run(host='0.0.0.0', port=10000)
