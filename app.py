@@ -17,7 +17,7 @@ def procesar_encuesta():
         data = request.json
         print("================ DATOS RECIBIDOS ================", flush=True)
         
-        # 1. Extraer token y URL del servicio de ArcGIS
+        # 1. Extraer token de ArcGIS del Webhook
         portal_info = data.get('portalInfo', {})
         arcgis_token = portal_info.get('token', '')
         
@@ -54,7 +54,7 @@ def procesar_encuesta():
         doc = DocxTemplate(template_path)
         
         # ---------------------------------------------------------
-        # MAPA DE LOCALIZACIÓN
+        # 2. MAPA DE LOCALIZACIÓN
         # ---------------------------------------------------------
         if lon and lat:
             map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=15&size=450x250&markers={lat},{lon},lightblue"
@@ -74,11 +74,11 @@ def procesar_encuesta():
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # DESCARGA DE FOTOS (Búsqueda dual: Webhook + API ArcGIS)
+        # 3. DESCARGA ROBUSTA DE FOTOS DIRECTO DE ARCGIS REST
         # ---------------------------------------------------------
         lista_adjuntos = []
         
-        # Intento A: Buscar en el JSON del Webhook
+        # Primero revisamos si el Webhook trajo algo en la carga útil
         attachments_payload = data.get('attachments', {})
         if isinstance(attachments_payload, dict):
             for _, lista_fotos in attachments_payload.items():
@@ -87,29 +87,31 @@ def procesar_encuesta():
         elif isinstance(attachments_payload, list):
             lista_adjuntos = attachments_payload
 
-        # Intento B: Si el webhook no trajo URLs, consultarlas directo a la capa REST de ArcGIS
+        # Si el webhook viene vacío, consultamos directamente la API REST de ArcGIS de forma segura
         if not lista_adjuntos and object_id != 'temp':
-            layer_url = portal_info.get('url') or data.get('layerInfo', {}).get('url')
-            if layer_url:
-                query_url = f"{layer_url}/{object_id}/attachments?f=json"
-                if arcgis_token:
-                    query_url += f"&token={arcgis_token}"
-                try:
+            try:
+                # Extraemos la URL de la capa que viene en el feature o usamos una consulta genérica si aplica
+                layer_url = feature.get('url') or portal_info.get('url')
+                
+                # Si por alguna razón la URL no viene en el JSON, la intentamos armar o la leemos con seguridad:
+                if layer_url and object_id:
+                    query_url = f"{layer_url}/{object_id}/attachments?f=json"
+                    if arcgis_token:
+                        query_url += f"&token={arcgis_token}"
+                        
                     att_res = requests.get(query_url, timeout=10)
                     if att_res.status_code == 200:
                         att_data = att_res.json()
-                        attachment_infos = att_data.get('attachmentInfos', [])
-                        for att_info in attachment_infos:
+                        for att_info in att_data.get('attachmentInfos', []):
                             att_id = att_info.get('id')
-                            # Construir URL directa de descarga del archivo adjunto
                             download_link = f"{layer_url}/{object_id}/attachments/{att_id}"
                             lista_adjuntos.append({'url': download_link})
-                except Exception as e:
-                    print(f"Error consultando adjuntos en ArcGIS REST: {e}", flush=True)
+            except Exception as e:
+                print(f"Aviso en consulta REST de ArcGIS (ignorable si no aplica): {e}", flush=True)
 
         print(f"Total de fotos listas para procesar: {len(lista_adjuntos)}", flush=True)
 
-        # Descargar e incrustar las fotos en la plantilla Word
+        # Descargar e incrustar las fotos encontradas
         for i, att in enumerate(lista_adjuntos[:10], start=1):
             if isinstance(att, dict):
                 att_url = att.get('url')
@@ -135,14 +137,13 @@ def procesar_encuesta():
                     except Exception as ex:
                         print(f"Excepción descargando foto {i}: {ex}", flush=True)
 
-        # Renderizar y guardar documento
+        # ---------------------------------------------------------
+        # 4. RENDERIZAR DOCUMENTO Y ENVIAR A WHATSAPP
+        # ---------------------------------------------------------
         doc.render(atributos)
         doc.save(output_path)
-        print("Documento Word generado exitosamente.", flush=True)
+        print("Documento Word generado exitosamente con todos los atributos.", flush=True)
 
-        # ---------------------------------------------------------
-        # ENVIAR A WHATSAPP
-        # ---------------------------------------------------------
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         
@@ -193,7 +194,7 @@ def procesar_encuesta():
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"Error interno: {str(e)}", flush=True)
+        print(f"Error interno fatal: {str(e)}", flush=True)
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
