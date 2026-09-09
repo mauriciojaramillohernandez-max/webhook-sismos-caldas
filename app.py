@@ -17,8 +17,9 @@ def procesar_encuesta():
         data = request.json
         print("================ DATOS RECIBIDOS ================", flush=True)
         
-        # 1. Extraer token de ArcGIS para poder descargar fotos privadas
-        arcgis_token = data.get('portalInfo', {}).get('token', '')
+        # 1. Extraer token y URL del servicio de ArcGIS
+        portal_info = data.get('portalInfo', {})
+        arcgis_token = portal_info.get('token', '')
         
         feature = data.get('feature', {})
         atributos = feature.get('attributes', {})
@@ -53,7 +54,7 @@ def procesar_encuesta():
         doc = DocxTemplate(template_path)
         
         # ---------------------------------------------------------
-        # MAPA DE LOCALIZACIÓN (OpenStreetMap estático)
+        # MAPA DE LOCALIZACIÓN
         # ---------------------------------------------------------
         if lon and lat:
             map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=15&size=450x250&markers={lat},{lon},lightblue"
@@ -73,42 +74,59 @@ def procesar_encuesta():
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # DESCARGA DEFINITIVA DE FOTOS (En la raíz del JSON 'data')
+        # DESCARGA DE FOTOS (Búsqueda dual: Webhook + API ArcGIS)
         # ---------------------------------------------------------
-        attachments = data.get('attachments', {})
-        
-        # Aplanar el diccionario de Survey123 para sacar todos los adjuntos a una sola lista
         lista_adjuntos = []
-        if isinstance(attachments, dict):
-            for nombre_pregunta, lista_fotos in attachments.items():
+        
+        # Intento A: Buscar en el JSON del Webhook
+        attachments_payload = data.get('attachments', {})
+        if isinstance(attachments_payload, dict):
+            for _, lista_fotos in attachments_payload.items():
                 if isinstance(lista_fotos, list):
                     lista_adjuntos.extend(lista_fotos)
-        elif isinstance(attachments, list):
-            lista_adjuntos = attachments
+        elif isinstance(attachments_payload, list):
+            lista_adjuntos = attachments_payload
 
-        print(f"Total de fotos encontradas en el JSON: {len(lista_adjuntos)}", flush=True)
+        # Intento B: Si el webhook no trajo URLs, consultarlas directo a la capa REST de ArcGIS
+        if not lista_adjuntos and object_id != 'temp':
+            layer_url = portal_info.get('url') or data.get('layerInfo', {}).get('url')
+            if layer_url:
+                query_url = f"{layer_url}/{object_id}/attachments?f=json"
+                if arcgis_token:
+                    query_url += f"&token={arcgis_token}"
+                try:
+                    att_res = requests.get(query_url, timeout=10)
+                    if att_res.status_code == 200:
+                        att_data = att_res.json()
+                        attachment_infos = att_data.get('attachmentInfos', [])
+                        for att_info in attachment_infos:
+                            att_id = att_info.get('id')
+                            # Construir URL directa de descarga del archivo adjunto
+                            download_link = f"{layer_url}/{object_id}/attachments/{att_id}"
+                            lista_adjuntos.append({'url': download_link})
+                except Exception as e:
+                    print(f"Error consultando adjuntos en ArcGIS REST: {e}", flush=True)
 
-        # Descargar las fotos usando el token
+        print(f"Total de fotos listas para procesar: {len(lista_adjuntos)}", flush=True)
+
+        # Descargar e incrustar las fotos en la plantilla Word
         for i, att in enumerate(lista_adjuntos[:10], start=1):
             if isinstance(att, dict):
                 att_url = att.get('url')
                 if att_url:
                     download_url = att_url
-                    # Agregar token de ArcGIS a la URL para saltar la seguridad
-                    if arcgis_token:
-                        separator = "&" if "?" in att_url else "?"
-                        download_url = f"{att_url}{separator}token={arcgis_token}"
+                    if arcgis_token and "token=" not in download_url:
+                        separator = "&" if "?" in download_url else "?"
+                        download_url = f"{download_url}{separator}token={arcgis_token}"
                         
                     try:
                         photo_res = requests.get(download_url, timeout=15)
-                        
                         if photo_res.status_code == 200:
                             photo_path = f"foto_{object_id}_{i}.jpg"
                             with open(photo_path, "wb") as f:
                                 f.write(photo_res.content)
                             downloaded_files.append(photo_path)
                             
-                            # Inserta la foto en la etiqueta exacta de Word
                             tag_name = f"registro_fotogr_fico_{i}"
                             atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
                             print(f"Foto {i} descargada e insertada con éxito.", flush=True)
@@ -139,7 +157,6 @@ def procesar_encuesta():
             upload_response = requests.post(upload_url, headers=headers_auth, data=payload_media, files=files)
             upload_result = upload_response.json()
             
-        # Validación mejorada con impresión de error exacto
         if "id" not in upload_result:
             print(f"Error de Meta al subir archivo: {upload_result}", flush=True)
             return jsonify({"error": "Fallo al subir documento", "details": upload_result}), 500
@@ -166,7 +183,7 @@ def procesar_encuesta():
         msg_response = requests.post(message_url, headers=headers_msg, json=payload_message)
         print(f"Resultado final Meta: {msg_response.json()}", flush=True)
 
-        # Limpieza de archivos temporales
+        # Limpieza
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
@@ -177,7 +194,6 @@ def procesar_encuesta():
 
     except Exception as e:
         print(f"Error interno: {str(e)}", flush=True)
-        # Limpieza de emergencia
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
