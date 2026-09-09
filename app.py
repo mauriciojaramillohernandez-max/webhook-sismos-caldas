@@ -17,6 +17,9 @@ def procesar_encuesta():
         data = request.json
         print("================ DATOS RECIBIDOS ================", flush=True)
         
+        # 1. Extraer token de ArcGIS para poder descargar fotos privadas
+        arcgis_token = data.get('portalInfo', {}).get('token', '')
+        
         feature = data.get('feature', {})
         atributos = feature.get('attributes', {})
         geometria = feature.get('geometry', {})
@@ -50,7 +53,7 @@ def procesar_encuesta():
         doc = DocxTemplate(template_path)
         
         # ---------------------------------------------------------
-        # 1. MAPA DE LOCALIZACIÓN (OpenStreetMap estático)
+        # MAPA DE LOCALIZACIÓN
         # ---------------------------------------------------------
         if lon and lat:
             map_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=15&size=450x250&markers={lat},{lon},lightblue"
@@ -64,26 +67,29 @@ def procesar_encuesta():
                     atributos['mapa_ubicacion'] = InlineImage(doc, map_path, width=Inches(5.0))
                 else:
                     atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
-            except Exception as e:
-                print(f"No se pudo descargar el mapa: {e}", flush=True)
+            except Exception:
                 atributos['mapa_ubicacion'] = f"Ubicación GPS -> Lat: {lat}, Lon: {lon}"
         else:
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # 2. PROCESAR FOTOS ADJUNTAS DE SURVEY123 (Con logs de diagnóstico)
+        # DESCARGA DEFINITIVA DE FOTOS (Usando el Token de ArcGIS)
         # ---------------------------------------------------------
         attachments = feature.get('attachments', [])
-        print(f"Adjuntos encontrados en el payload: {attachments}", flush=True)
         
         if isinstance(attachments, list):
             for i, att in enumerate(attachments[:10], start=1):
                 if isinstance(att, dict):
                     att_url = att.get('url')
                     if att_url:
+                        # AGREGAR EL TOKEN DE ARCGIS A LA URL DE LA FOTO
+                        download_url = att_url
+                        if arcgis_token:
+                            separator = "&" if "?" in att_url else "?"
+                            download_url = f"{att_url}{separator}token={arcgis_token}"
+                            
                         try:
-                            photo_res = requests.get(att_url, timeout=15)
-                            print(f"Descargando foto {i} - Status HTTP: {photo_res.status_code}", flush=True)
+                            photo_res = requests.get(download_url, timeout=15)
                             
                             if photo_res.status_code == 200:
                                 photo_path = f"foto_{object_id}_{i}.jpg"
@@ -91,20 +97,22 @@ def procesar_encuesta():
                                     f.write(photo_res.content)
                                 downloaded_files.append(photo_path)
                                 
+                                # Inserta la foto en la etiqueta exacta de Word
                                 tag_name = f"registro_fotogr_fico_{i}"
                                 atributos[tag_name] = InlineImage(doc, photo_path, width=Inches(4.5))
+                                print(f"Foto {i} descargada e insertada con éxito.", flush=True)
                             else:
-                                print(f"Fallo al descargar foto {i}. Respuesta: {photo_res.text[:200]}", flush=True)
+                                print(f"Fallo al descargar foto {i}. Status: {photo_res.status_code}", flush=True)
                         except Exception as ex:
                             print(f"Excepción descargando foto {i}: {ex}", flush=True)
 
-        # Renderizar plantilla con todos los datos y gráficos
+        # Renderizar y guardar documento
         doc.render(atributos)
         doc.save(output_path)
-        print("Documento Word con mapa y fotos generado exitosamente.", flush=True)
+        print("Documento Word generado exitosamente.", flush=True)
 
         # ---------------------------------------------------------
-        # 3. ENVIAR A WHATSAPP
+        # ENVIAR A WHATSAPP
         # ---------------------------------------------------------
         upload_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_ID}/media"
         headers_auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -121,8 +129,7 @@ def procesar_encuesta():
             upload_result = upload_response.json()
             
         if "id" not in upload_result:
-            print(f"Error de Meta al subir archivo: {upload_result}", flush=True)
-            return jsonify({"error": "Fallo al subir documento", "details": upload_result}), 500
+            return jsonify({"error": "Fallo al subir documento a Meta"}), 500
             
         media_id = upload_result["id"]
 
@@ -143,10 +150,9 @@ def procesar_encuesta():
             "Content-Type": "application/json"
         }
         
-        msg_response = requests.post(message_url, headers=headers_msg, json=payload_message)
-        print(f"Resultado final Meta: {msg_response.json()}", flush=True)
+        requests.post(message_url, headers=headers_msg, json=payload_message)
 
-        # Limpieza de archivos temporales locales
+        # Limpieza de archivos temporales
         if os.path.exists(output_path):
             os.remove(output_path)
         for f_path in downloaded_files:
@@ -156,9 +162,7 @@ def procesar_encuesta():
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"Error interno fatal: {str(e)}", flush=True)
-        if output_path and os.path.exists(output_path):
-            os.remove(output_path)
+        print(f"Error interno: {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
