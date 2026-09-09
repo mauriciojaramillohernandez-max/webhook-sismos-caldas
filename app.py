@@ -73,9 +73,9 @@ def procesar_encuesta():
             atributos['mapa_ubicacion'] = "Coordenadas no disponibles"
 
         # ---------------------------------------------------------
-        # DESCARGA DEFINITIVA DE FOTOS (Extracción de Diccionario + Token)
+        # DESCARGA DEFINITIVA DE FOTOS (En la raíz del JSON 'data')
         # ---------------------------------------------------------
-        attachments = feature.get('attachments', {})
+        attachments = data.get('attachments', {})
         
         # Aplanar el diccionario de Survey123 para sacar todos los adjuntos a una sola lista
         lista_adjuntos = []
